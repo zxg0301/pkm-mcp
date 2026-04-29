@@ -126,13 +126,14 @@ async function fetchWorkspaceOwnerId(workspaceId: string): Promise<number | unde
 }
 
 // ── MCP Server ──
-const server = new McpServer({
-  name: "mcp-filestore",
-  version: "0.2.0",
-});
+function createMcpServer() {
+  const s = new McpServer({
+    name: "mcp-filestore",
+    version: "0.2.0",
+  });
 
-// ── Tool: 加入知识库 ──
-server.tool(
+  // ── Tool: 加入知识库 ──
+  s.tool(
   "add_to_knowledge_base",
   "Add knowledge content to the personal knowledge base.",
   {
@@ -169,7 +170,7 @@ server.tool(
 
     const { rows } = await pool.query(
       `INSERT INTO PKM.knowledge_docs (user_id, title, summary_md, source_files, tags)
-       VALUES ($1, $2, $3::jsonb, $4, $5)
+       VALUES ($1, $2, $3, $4::jsonb, $5)
        RETURNING id, title, created_at`,
       [userId, title, fullMd, "[]", tags ?? null],
     );
@@ -221,7 +222,7 @@ server.tool(
 );
 
 // ── Tool: 从 OAH sandbox 导入 ──
-server.tool(
+s.tool(
   "import_from_oah",
   "Import documents from an OAH sandbox into the knowledge base.",
   {
@@ -272,7 +273,7 @@ server.tool(
 );
 
 // ── Tool: 导出到 OAH sandbox ──
-server.tool(
+s.tool(
   "export_to_oah",
   "Export knowledge docs to an OAH workspace sandbox.",
   {
@@ -323,7 +324,7 @@ server.tool(
 );
 
 // ── Tool: 扫描目录 ──
-server.tool(
+s.tool(
   "scan_directory",
   "Scan a local directory and store its summary in the knowledge base.",
   {
@@ -372,7 +373,7 @@ server.tool(
 );
 
 // ── Tool: 导出知识文档到当前目录 ──
-server.tool(
+s.tool(
   "export_knowledge_doc_to_cwd",
   "Export a knowledge doc markdown to the current working directory.",
   {
@@ -396,7 +397,7 @@ server.tool(
 );
 
 // ── Tool: 列出知识文档 ──
-server.tool(
+s.tool(
   "list_knowledge_docs",
   "List knowledge documents.",
   { limit: z.number().int().optional().default(50) },
@@ -409,7 +410,7 @@ server.tool(
 );
 
 // ── Tool: 获取知识文档详情 ──
-server.tool(
+s.tool(
   "get_knowledge_doc",
   "Get a knowledge document by ID.",
   { id: z.number().int() },
@@ -422,7 +423,7 @@ server.tool(
 );
 
 // ── Tool: 搜索知识库 ──
-server.tool(
+s.tool(
   "search_knowledge_files",
   "Search knowledge docs by keyword.",
   { query: z.string().min(1), limit: z.number().int().optional().default(20) },
@@ -437,7 +438,7 @@ server.tool(
 );
 
 // ── Tool: 搜索并下载相关文件 ──
-server.tool(
+s.tool(
   "search_and_download_files",
   "Search docs and download attachments to current working directory.",
   { query: z.string().min(1), doc_limit: z.number().int().optional().default(10), max_files: z.number().int().optional().default(30), subdir: z.string().optional() },
@@ -474,7 +475,7 @@ server.tool(
 );
 
 // ── Tool: 删除知识文档 ──
-server.tool(
+s.tool(
   "delete_knowledge_doc",
   "Delete a knowledge document.",
   { id: z.number().int() },
@@ -490,7 +491,7 @@ server.tool(
 );
 
 // ── Tool: 下载附件 ──
-server.tool(
+s.tool(
   "get_attachment",
   "Download an attachment by ID (returns base64).",
   { id: z.number().int() },
@@ -512,7 +513,7 @@ server.tool(
 );
 
 // ── Tool: 列出附件 ──
-server.tool(
+s.tool(
   "list_attachments",
   "List attachments for a document.",
   { doc_id: z.number().int() },
@@ -523,7 +524,7 @@ server.tool(
 );
 
 // ── Tool: 删除附件 ──
-server.tool(
+s.tool(
   "delete_attachment",
   "Delete an attachment.",
   { id: z.number().int() },
@@ -537,10 +538,13 @@ server.tool(
 );
 
 // ── Resource: 知识文档列表 ──
-server.resource("knowledge-docs", "pkm://knowledge-docs", async (uri: URL) => {
+s.resource("knowledge-docs", "pkm://knowledge-docs", async (uri: URL) => {
   const { rows } = await pool.query(`SELECT id, title, tags, created_at, (SELECT count(*) FROM PKM.attachments WHERE doc_id = PKM.knowledge_docs.id) AS attachment_count FROM PKM.knowledge_docs ORDER BY created_at DESC LIMIT 100`);
   return { contents: [{ uri: uri.href, text: JSON.stringify(rows, null, 2) }] };
 });
+
+  return s;
+}
 
 // ── 启动 ──
 const MCP_TRANSPORT = process.env.MCP_TRANSPORT ?? "stdio";
@@ -556,16 +560,18 @@ async function main() {
       res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
       if (req.method === "OPTIONS") { res.writeHead(204); res.end(); return; }
 
+      const mcpServer = createMcpServer();
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
-      await server.connect(transport);
+      await mcpServer.connect(transport);
       await transport.handleRequest(req, res);
     });
     httpServer.listen(MCP_PORT, () => {
       console.log(`MCP server (HTTP) listening on http://0.0.0.0:${MCP_PORT}/mcp`);
     });
   } else {
+    const mcpServer = createMcpServer();
     const transport = new StdioServerTransport();
-    await server.connect(transport);
+    await mcpServer.connect(transport);
   }
 }
 
