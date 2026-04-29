@@ -116,6 +116,14 @@ async function oahUploadFile(sandboxId: string, sandboxPath: string, content: Bu
   );
 }
 
+async function fetchWorkspaceOwnerId(workspaceId: string): Promise<number | undefined> {
+  const resp = await oahRequest(`/workspaces/${encodeURIComponent(workspaceId)}`);
+  const data = (await resp.json()) as { id: string; ownerId?: string };
+  if (!data.ownerId || data.ownerId.trim() === "") return undefined;
+  const parsed = Number.parseInt(data.ownerId, 10);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
 // ── MCP Server ──
 const server = new McpServer({
   name: "mcp-filestore",
@@ -131,8 +139,20 @@ server.tool(
     summary_md: z.string().describe("Markdown content summarizing the knowledge points"),
     tags: z.string().optional().describe("Optional comma-separated tags"),
     file_paths: z.array(z.string()).optional().describe("Files to attach"),
+    workspace_id: z.string().optional().describe("OAH workspace ID to resolve ownerId as userId"),
   },
-  async ({ title, summary_md, tags, file_paths }) => {
+  async ({ title, summary_md, tags, file_paths, workspace_id }) => {
+    let userId = 0;
+    if (workspace_id) {
+      try {
+        const ownerId = await fetchWorkspaceOwnerId(workspace_id);
+        if (ownerId !== undefined) userId = ownerId;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`Failed to resolve ownerId for workspace ${workspace_id}:`, msg);
+      }
+    }
+
     const metaLines: string[] = [];
     metaLines.push(`# ${title}`);
     metaLines.push("");
@@ -150,7 +170,7 @@ server.tool(
       `INSERT INTO PKM.knowledge_docs (user_id, title, summary_md, source_files, tags)
        VALUES ($1, $2, $3::jsonb, $4, $5)
        RETURNING id, title, created_at`,
-      [0, title, fullMd, "[]", tags ?? null],
+      [userId, title, fullMd, "[]", tags ?? null],
     );
     const docId = rows[0].id;
 
@@ -213,6 +233,15 @@ server.tool(
     if (!OAH_BASE_URL) {
       return { content: [{ type: "text" as const, text: "OAH_BASE_URL not configured" }], isError: true };
     }
+    let userId = 0;
+    try {
+      const ownerId = await fetchWorkspaceOwnerId(workspace_id);
+      if (ownerId !== undefined) userId = ownerId;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`Failed to resolve ownerId for workspace ${workspace_id}:`, msg);
+    }
+
     const sandboxId = await resolveSandboxId(workspace_id);
     const sandboxRoot = await getSandboxRoot(sandboxId);
     const scanPath = dir_path?.trim() || sandboxRoot;
@@ -230,8 +259,8 @@ server.tool(
 
     const summaryMd = lines.join("\n");
     const { rows } = await pool.query(
-      `INSERT INTO PKM.knowledge_docs (user_id, title, summary_md, source_files, tags) VALUES (0,$1,$2,$3::jsonb,$4) RETURNING id`,
-      [docTitle, summaryMd, JSON.stringify(allFiles.map((f) => ({ path: f.name, ext: extname(f.name).toLowerCase(), isText: isTextFile(f.name), size: f.size }))), tags ?? null],
+      `INSERT INTO PKM.knowledge_docs (user_id, title, summary_md, source_files, tags) VALUES ($1,$2,$3,$4::jsonb,$5) RETURNING id`,
+      [userId, docTitle, summaryMd, JSON.stringify(allFiles.map((f) => ({ path: f.name, ext: extname(f.name).toLowerCase(), isText: isTextFile(f.name), size: f.size }))), tags ?? null],
     );
     const docId = rows[0].id;
 
