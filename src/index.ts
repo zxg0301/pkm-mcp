@@ -413,12 +413,23 @@ s.tool(
   "Export a knowledge doc markdown to the current working directory.",
   {
     id: z.number().int(),
+    workspace_id: z.string().describe("OAH workspace ID to resolve ownerId as userId"),
     file_name: z.string().optional(),
     subdir: z.string().optional(),
   },
-  async ({ id, file_name, subdir }) => {
-    const { rows } = await pool.query(`SELECT id, title, summary_md FROM PKM.knowledge_docs WHERE id = $1`, [id]);
-    if (rows.length === 0) return { content: [{ type: "text" as const, text: `Doc id=${id} not found` }], isError: true };
+  async ({ id, workspace_id, file_name, subdir }) => {
+    let userId = 0;
+    try {
+      const ownerId = await fetchWorkspaceOwnerId(workspace_id);
+      if (ownerId !== undefined) userId = ownerId;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`Failed to resolve ownerId for workspace ${workspace_id}:`, msg);
+    }
+    console.log(`[export_knowledge_doc_to_cwd] workspace_id=${workspace_id}, resolved userId=${userId}`);
+
+    const { rows } = await pool.query(`SELECT id, title, summary_md FROM PKM.knowledge_docs WHERE id = $1 AND user_id = $2`, [id, userId]);
+    if (rows.length === 0) return { content: [{ type: "text" as const, text: `Doc id=${id} not found for user_id=${userId}` }], isError: true };
 
     const doc = rows[0];
     const baseName = (file_name?.trim() || `${doc.title ?? "untitled"}.md`).replace(/\.md$/i, "") + ".md";
