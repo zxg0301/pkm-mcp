@@ -23,14 +23,17 @@ import {
   safeJoinUnder,
 } from "./common.js";
 
-// ── OAH Sandbox Files API 客户端 ──
+// ── OAH Workspace Files API 客户端 ──
 const OAH_BASE_URL = process.env.OAH_BASE_URL ?? "";
 
+function getOahBaseUrl(): string {
+  if (!OAH_BASE_URL) throw new Error("OAH_BASE_URL is not configured");
+  return OAH_BASE_URL.startsWith("http") ? OAH_BASE_URL : `http://${OAH_BASE_URL}`;
+}
+
 async function oahRequest(path: string, options: RequestInit = {}): Promise<Response> {
-  if (!OAH_BASE_URL) {
-    throw new Error("OAH_BASE_URL is not configured");
-  }
-  const url = `${OAH_BASE_URL}/api/v1${path}`;
+  const base = getOahBaseUrl();
+  const url = `${base}/api/v1${path}`;
   const resp = await fetch(url, options);
   if (!resp.ok) {
     const body = await resp.text().catch(() => "");
@@ -39,35 +42,19 @@ async function oahRequest(path: string, options: RequestInit = {}): Promise<Resp
   return resp;
 }
 
-async function resolveSandboxId(workspaceId: string): Promise<string> {
-  const resp = await oahRequest("/sandboxes", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ workspaceId }),
-  });
-  const data = (await resp.json()) as { id: string };
-  return data.id;
-}
-
-async function getSandboxRoot(sandboxId: string): Promise<string> {
-  const resp = await oahRequest(`/sandboxes/${sandboxId}`);
-  const data = (await resp.json()) as { rootPath: string };
-  return data.rootPath || "/workspace";
-}
-
-async function oahListAllFiles(sandboxId: string, dirPath: string): Promise<{ path: string; name: string; size: number; type: string }[]> {
+async function oahListAllFiles(workspaceId: string, dirPath: string): Promise<{ path: string; name: string; size: number; type: string }[]> {
   const results: { path: string; name: string; size: number; type: string }[] = [];
   try {
     const resp = await oahRequest(
-      `/sandboxes/${sandboxId}/files/entries?path=${encodeURIComponent(dirPath)}`,
+      `/workspaces/${encodeURIComponent(workspaceId)}/entries?path=${encodeURIComponent(dirPath)}`,
     );
-    const data = (await resp.json()) as { items: { path: string; name: string; size?: number; type?: string; isDirectory?: boolean }[] };
+    const data = (await resp.json()) as { items: { path: string; name: string; sizeBytes?: number; type?: string }[] };
     for (const item of data.items ?? []) {
-      if (item.isDirectory || item.type === "directory") {
-        const subFiles = await oahListAllFiles(sandboxId, item.path);
+      if (item.type === "directory") {
+        const subFiles = await oahListAllFiles(workspaceId, item.path);
         results.push(...subFiles);
       } else {
-        results.push({ path: item.path, name: item.name, size: item.size ?? 0, type: item.type ?? "file" });
+        results.push({ path: item.path, name: item.name, size: item.sizeBytes ?? 0, type: item.type ?? "file" });
       }
     }
   } catch {
@@ -76,9 +63,9 @@ async function oahListAllFiles(sandboxId: string, dirPath: string): Promise<{ pa
   return results;
 }
 
-async function oahReadFileContent(sandboxId: string, filePath: string): Promise<string> {
+async function oahReadFileContent(workspaceId: string, filePath: string): Promise<string> {
   const resp = await oahRequest(
-    `/sandboxes/${sandboxId}/files/content?path=${encodeURIComponent(filePath)}`,
+    `/workspaces/${encodeURIComponent(workspaceId)}/files/content?path=${encodeURIComponent(filePath)}`,
   );
   const data = (await resp.json()) as { content: string; encoding?: string };
   if (data.encoding === "base64") {
@@ -87,17 +74,17 @@ async function oahReadFileContent(sandboxId: string, filePath: string): Promise<
   return data.content;
 }
 
-async function oahDownloadFileBuffer(sandboxId: string, filePath: string): Promise<Buffer> {
+async function oahDownloadFileBuffer(workspaceId: string, filePath: string): Promise<Buffer> {
   const resp = await oahRequest(
-    `/sandboxes/${sandboxId}/files/download?path=${encodeURIComponent(filePath)}`,
+    `/workspaces/${encodeURIComponent(workspaceId)}/files/download?path=${encodeURIComponent(filePath)}`,
   );
   const arrayBuf = await resp.arrayBuffer();
   return Buffer.from(arrayBuf);
 }
 
-async function oahWriteFile(sandboxId: string, sandboxPath: string, content: string): Promise<void> {
+async function oahWriteFile(workspaceId: string, filePath: string, content: string): Promise<void> {
   await oahRequest(
-    `/sandboxes/${sandboxId}/files/content?path=${encodeURIComponent(sandboxPath)}`,
+    `/workspaces/${encodeURIComponent(workspaceId)}/files/content?path=${encodeURIComponent(filePath)}`,
     {
       method: "PUT",
       headers: { "content-type": "application/json" },
@@ -106,9 +93,9 @@ async function oahWriteFile(sandboxId: string, sandboxPath: string, content: str
   );
 }
 
-async function oahUploadFile(sandboxId: string, sandboxPath: string, content: Buffer, contentType: string): Promise<void> {
+async function oahUploadFile(workspaceId: string, filePath: string, content: Buffer, contentType: string): Promise<void> {
   await oahRequest(
-    `/sandboxes/${sandboxId}/files/upload?path=${encodeURIComponent(sandboxPath)}`,
+    `/workspaces/${encodeURIComponent(workspaceId)}/files/upload?path=${encodeURIComponent(filePath)}`,
     {
       method: "PUT",
       headers: { "content-type": contentType },
@@ -118,11 +105,32 @@ async function oahUploadFile(sandboxId: string, sandboxPath: string, content: Bu
 }
 
 async function fetchWorkspaceOwnerId(workspaceId: string): Promise<number | undefined> {
+  console.log(`[ownerId] Resolving ownerId for workspace: ${workspaceId}`);
   const resp = await oahRequest(`/workspaces/${encodeURIComponent(workspaceId)}`);
   const data = (await resp.json()) as { id: string; ownerId?: string };
-  if (!data.ownerId || data.ownerId.trim() === "") return undefined;
+  console.log(`[ownerId] API returned ownerId: ${data.ownerId ?? "(empty)"}`);
+  if (!data.ownerId || data.ownerId.trim() === "") {
+    console.log(`[ownerId] ownerId is empty or missing, falling back to userId=0`);
+    return undefined;
+  }
   const parsed = Number.parseInt(data.ownerId, 10);
-  return Number.isFinite(parsed) ? parsed : undefined;
+  if (!Number.isFinite(parsed)) {
+    console.warn(`[ownerId] ownerId "${data.ownerId}" is not a valid number, falling back to userId=0`);
+    return undefined;
+  }
+  console.log(`[ownerId] Resolved ownerId: ${parsed} for workspace: ${workspaceId}`);
+  return parsed;
+}
+
+async function oahCreateDirectory(workspaceId: string, dirPath: string): Promise<void> {
+  await oahRequest(
+    `/workspaces/${encodeURIComponent(workspaceId)}/directories`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ path: dirPath }),
+    },
+  );
 }
 
 // ── MCP Server ──
@@ -141,19 +149,18 @@ function createMcpServer() {
     summary_md: z.string().describe("Markdown content summarizing the knowledge points"),
     tags: z.string().optional().describe("Optional comma-separated tags"),
     file_paths: z.array(z.string()).optional().describe("Files to attach"),
-    workspace_id: z.string().optional().describe("OAH workspace ID to resolve ownerId as userId"),
+    workspace_id: z.string().describe("OAH workspace ID to resolve ownerId as userId (required)"),
   },
   async ({ title, summary_md, tags, file_paths, workspace_id }) => {
     let userId = 0;
-    if (workspace_id) {
-      try {
-        const ownerId = await fetchWorkspaceOwnerId(workspace_id);
-        if (ownerId !== undefined) userId = ownerId;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.error(`Failed to resolve ownerId for workspace ${workspace_id}:`, msg);
-      }
+    try {
+      const ownerId = await fetchWorkspaceOwnerId(workspace_id);
+      if (ownerId !== undefined) userId = ownerId;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`Failed to resolve ownerId for workspace ${workspace_id}:`, msg);
     }
+    console.log(`[add_to_knowledge_base] workspace_id=${workspace_id}, resolved userId=${userId}`);
 
     const metaLines: string[] = [];
     metaLines.push(`# ${title}`);
@@ -183,14 +190,29 @@ function createMcpServer() {
     if (file_paths && file_paths.length > 0) {
       for (const filePath of file_paths) {
         try {
-          const fileStat = await stat(filePath);
-          if (!fileStat.isFile()) continue;
-          if (fileStat.size > 100 * 1024 * 1024) continue;
+          let fileBuf: Buffer;
+          let fileName: string;
+          let ext: string;
+          let contentType: string;
 
-          const fileBuf = await readFile(filePath);
-          const fileName = filePath.split(/[/\\]/).pop() ?? filePath;
-          const ext = extname(filePath).toLowerCase();
-          const contentType = guessMimeType(filePath);
+          if (OAH_BASE_URL) {
+            // OAH workspace 文件：通过 API 下载
+            fileBuf = await oahDownloadFileBuffer(workspace_id, filePath);
+            fileName = filePath.split(/[/\\]/).pop() ?? filePath;
+            ext = extname(fileName).toLowerCase();
+            contentType = guessMimeType(fileName);
+          } else {
+            // 本地文件：直接读取
+            const fileStat = await stat(filePath);
+            if (!fileStat.isFile()) continue;
+            if (fileStat.size > 100 * 1024 * 1024) continue;
+            fileBuf = await readFile(filePath);
+            fileName = filePath.split(/[/\\]/).pop() ?? filePath;
+            ext = extname(filePath).toLowerCase();
+            contentType = guessMimeType(filePath);
+          }
+
+          if (fileBuf.length > 100 * 1024 * 1024) continue;
 
           const count = fileNameCount.get(fileName) ?? 0;
           fileNameCount.set(fileName, count + 1);
@@ -205,7 +227,7 @@ function createMcpServer() {
             [docId, uniqueName, minioKey, contentType, fileBuf.length],
           );
 
-          sourceFiles.push({ path: uniqueName, ext, isText: isTextFile(filePath), size: fileBuf.length });
+          sourceFiles.push({ path: uniqueName, ext, isText: isTextFile(fileName), size: fileBuf.length });
           attachmentResults.push({ file_name: uniqueName, minio_key: minioKey, content_type: contentType, file_size: fileBuf.length });
         } catch (err) {
           const msg = err instanceof Error ? err.message : String(err);
@@ -221,10 +243,10 @@ function createMcpServer() {
   },
 );
 
-// ── Tool: 从 OAH sandbox 导入 ──
+// ── Tool: 从 OAH workspace 导入 ──
 s.tool(
   "import_from_oah",
-  "Import documents from an OAH sandbox into the knowledge base.",
+  "Import documents from an OAH workspace into the knowledge base.",
   {
     workspace_id: z.string().describe("OAH workspace ID"),
     dir_path: z.string().optional(),
@@ -243,17 +265,23 @@ s.tool(
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`Failed to resolve ownerId for workspace ${workspace_id}:`, msg);
     }
+    console.log(`[import_from_oah] workspace_id=${workspace_id}, resolved userId=${userId}`);
 
-    const sandboxId = await resolveSandboxId(workspace_id);
-    const sandboxRoot = await getSandboxRoot(sandboxId);
-    const scanPath = dir_path?.trim() || sandboxRoot;
+    // 获取 workspace 信息以确定 rootPath
+    let workspaceRoot = "/workspace";
+    try {
+      const wsResp = await oahRequest(`/workspaces/${encodeURIComponent(workspace_id)}`);
+      const wsData = (await wsResp.json()) as { rootPath?: string };
+      if (wsData.rootPath) workspaceRoot = wsData.rootPath;
+    } catch {}
+    const scanPath = dir_path?.trim() || workspaceRoot;
 
-    const allFiles = await oahListAllFiles(sandboxId, scanPath);
+    const allFiles = await oahListAllFiles(workspace_id, scanPath);
     const textFiles = allFiles.filter((f) => isTextFile(f.name));
     const binaryFiles = allFiles.filter((f) => !isTextFile(f.name));
 
     const docTitle = title ?? `OAH Import ${new Date().toISOString().slice(0, 19)}`;
-    const lines: string[] = [`# ${docTitle}`, "", `- Source: OAH sandbox (${workspace_id})`, `- Path: ${scanPath}`, `- Imported: ${new Date().toISOString()}`];
+    const lines: string[] = [`# ${docTitle}`, "", `- Source: OAH workspace (${workspace_id})`, `- Path: ${scanPath}`, `- Imported: ${new Date().toISOString()}`];
     if (tags) lines.push(`- Tags: ${tags}`);
     lines.push("", "---", "", "## Files", "");
     for (const f of textFiles) lines.push(`- [TEXT] ${f.name} (${(f.size / 1024).toFixed(1)} KB)`);
@@ -272,10 +300,10 @@ s.tool(
   },
 );
 
-// ── Tool: 导出到 OAH sandbox ──
+// ── Tool: 导出到 OAH workspace ──
 s.tool(
   "export_to_oah",
-  "Export knowledge docs to an OAH workspace sandbox.",
+  "Export knowledge docs to an OAH workspace.",
   {
     workspace_id: z.string(),
     doc_ids: z.array(z.number().int()).optional(),
@@ -286,9 +314,14 @@ s.tool(
     if (!OAH_BASE_URL) {
       return { content: [{ type: "text" as const, text: "OAH_BASE_URL not configured" }], isError: true };
     }
-    const sandboxId = await resolveSandboxId(workspace_id);
-    const sandboxRoot = await getSandboxRoot(sandboxId);
-    const baseDir = subdir?.trim() ? `${sandboxRoot}/${subdir.trim().replace(/^\/+/, "")}` : sandboxRoot;
+    // 获取 workspace 信息以确定 rootPath
+    let workspaceRoot = "/workspace";
+    try {
+      const wsResp = await oahRequest(`/workspaces/${encodeURIComponent(workspace_id)}`);
+      const wsData = (await wsResp.json()) as { rootPath?: string };
+      if (wsData.rootPath) workspaceRoot = wsData.rootPath;
+    } catch {}
+    const baseDir = subdir?.trim() ? `${workspaceRoot}/${subdir.trim().replace(/^\/+/, "")}` : workspaceRoot;
 
     let docs: any[];
     if (doc_ids && doc_ids.length > 0) {
@@ -309,8 +342,10 @@ s.tool(
     for (const doc of docs) {
       const docDirName = slugifyFileName(doc.title ?? `doc-${doc.id}`);
       try {
-        const summaryPath = `${baseDir}/${docDirName}/README.md`;
-        await oahWriteFile(sandboxId, summaryPath, doc.summary_md ?? "");
+        const docDir = `${baseDir}/${docDirName}`;
+        await oahCreateDirectory(workspace_id, docDir);
+        const summaryPath = `${docDir}/README.md`;
+        await oahWriteFile(workspace_id, summaryPath, doc.summary_md ?? "");
         results.push({ doc_id: doc.id, title: doc.title, exported: true });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
